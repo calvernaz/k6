@@ -41,6 +41,8 @@ import (
 	"github.com/loadimpact/k6/lib/netext"
 	"github.com/loadimpact/k6/stats"
 	"github.com/pkg/errors"
+	"os"
+	"mime/multipart"
 )
 
 var (
@@ -361,4 +363,124 @@ func (http *HTTP) Url(parts []string, pieces ...string) URLTag {
 		}
 	}
 	return tag
+}
+
+func (*HTTP) SendFile(ctx context.Context, url goja.Value, args ...goja.Value) (*HTTPResponse, error) {
+	state := common.GetState(ctx)
+
+	var err error
+	var file *os.File
+
+	if len(args) > 0 && !goja.IsUndefined(args[0]) && !goja.IsNull(args[0]) {
+		file, err = os.Open(args[0].String())
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	tags := map[string]string{
+		"status": "0",
+		"method": "POST",
+		"url":    url.String(),
+		"name":   url.String(),
+		"group":  state.Group.Path,
+	}
+	timeout := 60 * time.Second
+	throw := state.Options.Throw.Bool
+
+	resp := &HTTPResponse{
+		ctx: ctx,
+		URL: url.String(),
+	}
+
+	client := http.Client{
+		Transport: state.HTTPTransport,
+		Timeout:   timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			max := int(state.Options.MaxRedirects.Int64)
+			if len(via) >= max {
+				return errors.Errorf("stopped after %d redirects", max)
+			}
+			return nil
+		},
+	}
+
+	var fileBody bytes.Buffer
+	writer := multipart.NewWriter(&fileBody)
+	fileInfo, _ := file.Stat()
+	part, err := writer.CreateFormFile("items[]", fileInfo.Name())
+	if err != nil {
+		return nil, err
+	}
+	_, err = io.Copy(part, file)
+
+	err = writer.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", url.String(), &fileBody)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	tracer := netext.Tracer{}
+	res, resErr := client.Do(req.WithContext(netext.WithTracer(ctx, &tracer)))
+	if resErr != nil {
+		return nil, resErr
+	}
+
+	if res != nil {
+		body, _ := ioutil.ReadAll(res.Body)
+		_ = res.Body.Close()
+		resp.Body = string(body)
+	}
+	trail := tracer.Done()
+	if trail.ConnRemoteAddr != nil {
+		remoteHost, remotePortStr, _ := net.SplitHostPort(trail.ConnRemoteAddr.String())
+		remotePort, _ := strconv.Atoi(remotePortStr)
+		resp.RemoteIP = remoteHost
+		resp.RemotePort = remotePort
+	}
+	resp.Timings = HTTPResponseTimings{
+		Duration:   stats.D(trail.Duration),
+		Blocked:    stats.D(trail.Blocked),
+		Connecting: stats.D(trail.Connecting),
+		Sending:    stats.D(trail.Sending),
+		Waiting:    stats.D(trail.Waiting),
+		Receiving:  stats.D(trail.Receiving),
+	}
+
+	if resErr != nil {
+		resp.Error = resErr.Error()
+		tags["error"] = resp.Error
+	} else {
+		resp.URL = res.Request.URL.String()
+		resp.Status = res.StatusCode
+		tags["url"] = resp.URL
+		tags["status"] = strconv.Itoa(resp.Status)
+
+		resp.Headers = make(map[string]string, len(res.Header))
+		for k, vs := range res.Header {
+			resp.Headers[k] = strings.Join(vs, ", ")
+		}
+	}
+
+	if resErr != nil {
+		// Do *not* log errors about the contex being cancelled.
+		select {
+		case <-ctx.Done():
+		default:
+			state.Logger.WithField("error", resErr).Warn("Request Failed")
+		}
+
+		if throw {
+			return nil, resErr
+		}
+	}
+
+	samples := trail.Samples(tags)
+	state.Samples = append(state.Samples, samples...)
+	return resp, err
 }
