@@ -6,7 +6,8 @@ RUN curl -sL https://deb.nodesource.com/setup_6.x | bash && \
 
 WORKDIR $GOPATH/src/github.com/loadimpact/k6
 ADD . .
-RUN npm -g install ember-cli bower && \
+RUN npm config set registry http://registry.npmjs.org/ && \
+	npm -g install ember-cli bower && \
 	make web && pwd && rm -r web/tmp web/node_modules web/bower_components && \
 	go get . && go install . && rm -rf $GOPATH/lib $GOPATH/pkg && \
 	(cd $GOPATH/src && ls | grep -v github | xargs rm -r) && \

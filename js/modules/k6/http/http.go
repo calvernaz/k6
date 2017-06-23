@@ -41,8 +41,8 @@ import (
 	"github.com/loadimpact/k6/lib/netext"
 	"github.com/loadimpact/k6/stats"
 	"github.com/pkg/errors"
-	"os"
 	"mime/multipart"
+	"os"
 )
 
 var (
@@ -385,7 +385,7 @@ func (*HTTP) SendFile(ctx context.Context, url goja.Value, args ...goja.Value) (
 		"name":   url.String(),
 		"group":  state.Group.Path,
 	}
-	timeout := 60 * time.Second
+	timeout := 90 * time.Second
 	throw := state.Options.Throw.Bool
 
 	resp := &HTTPResponse{
